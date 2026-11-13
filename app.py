@@ -151,21 +151,23 @@ def question_intent(message):
     return "question"
 
 
-def supplier_reply(decision, message="", offer=None, history=None, best=None):
+def supplier_reply(decision, message="", offer=None, history=None, best=None, student_name=""):
     """Python supplies the binding decision; OpenAI only phrases it."""
     history = history or []
+    student_name = (student_name or "").strip()
+    address = (student_name.split()[0] + ", ") if student_name else ""
     if decision == "accept":
         w, b = offer
-        fallback = (f"Thank you for your revised proposal. I can accept a wholesale price of ${w:.2f} "
+        fallback = (f"{address}thank you for your revised proposal. I can accept a wholesale price of ${w:.2f} "
                     f"and a buy-back price of ${b:.2f} for 15,000 units. "
                     "We have an agreement on these terms. You may continue negotiating with your remaining prompts; "
                     "this accepted offer will remain available if we cannot agree on later proposals.")
     elif decision == "reject":
-        fallback = ("Thank you for presenting your proposed terms. After reviewing the arrangement, "
+        fallback = (f"{address}thank you for presenting your proposed terms. After reviewing the arrangement, "
                     "I am unable to accept this offer. We remain interested in reaching an agreement, "
                     "and I would be happy to consider another specific proposal.")
     elif decision == "courtesy":
-        fallback = ("You're welcome. I appreciate the constructive discussion. "
+        fallback = (f"You're welcome, {student_name}. I appreciate the constructive discussion. "
                     "If you have prompts remaining, you are welcome to submit another proposal.")
     elif decision == "bargain_question":
         previous = (f"Our previously accepted wholesale price of ${best['wholesale_price']:.2f} "
@@ -189,13 +191,16 @@ def supplier_reply(decision, message="", offer=None, history=None, best=None):
         authoritative = {"decision": decision, "student_message": message,
                          "order_quantity": 15000,
                          "offer": {"wholesale_price": offer[0], "buyback_price": offer[1]} if offer else None,
+                         "student_name": student_name,
                          "best_accepted_terms": {"wholesale_price": best["wholesale_price"],
                                                  "buyback_price": best["buyback_price"]} if best else None}
         result = client.responses.create(
             model=OPENAI_MODEL, max_output_tokens=350,
             instructions=(
-                "You are MV's Widget, a professional, courteous, engaged supplier representative of MV Widget Company in a university "
-                "buy-back contract negotiation. Speak naturally in 2-4 concise sentences, with continuity "
+                "You are MV's Widget, a professional, courteous supplier representative of MV Widget Company, a commercial business in Wilmington, North Carolina. "
+                "This is a commercial buy-back supply contract negotiation, not a university contract. Address the buyer by the student_name provided in the authoritative context naturally, preferably by first name. "
+                "Never mention a university, student, professor, course, assignment, classroom, or simulation in supplier dialogue. Refer to the agreement as a buy-back supply contract or supply agreement. "
+                "Speak naturally in 2-4 concise sentences, with continuity "
                 "from the recent conversation. Acknowledge the student's actual question or proposal. "
                 "The supplied Python decision is FINAL and BINDING. For 'accept', clearly confirm acceptance; "
                 "for 'reject', clearly state you cannot accept. For 'courtesy', respond politely; "
@@ -210,6 +215,8 @@ def supplier_reply(decision, message="", offer=None, history=None, best=None):
         text = (result.output_text or "").strip()
         if not text or len(text) > 1100:
             return fallback, "fallback_empty_or_long"
+        if re.search(r"\b(university|student|professor|coursework|course|classroom|academic|assignment|simulation)\b", text, re.I):
+            return fallback, "fallback_educational_reference"
         if re.search(r"\b(unit cost|production cost|fixed cost|supplier profit|reservation|threshold|acceptance formula)\b", text, re.I):
             return fallback, "fallback_confidentiality"
         if decision == "accept" and not re.search(r"\b(accept|agree|acceptable)\b", text, re.I):
@@ -264,7 +271,8 @@ def record_prompt(message, decision, offer=None, student_profit=None, carried=""
     number = len(st.session_state.bb_log) + 1
     best = max(st.session_state.bb_accepted, key=lambda e: e["buyer_profit"]) if st.session_state.bb_accepted else None
     reply, source = supplier_reply(decision, message=message, offer=offer,
-                                   history=st.session_state.bb_messages, best=best)
+                                   history=st.session_state.bb_messages, best=best,
+                                   student_name=st.session_state.bb_name)
     if carried:
         reply = carried + " " + reply
     st.session_state.bb_api_source = source
