@@ -16,14 +16,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 st.set_page_config(page_title="Buy-Back Contract | BAN 517", page_icon="🤝", layout="wide")
 
-# INSTRUCTOR: Confirm the three high-demand probabilities before student release.
-DEMAND = [(5000,.01),(10000,.02),(11000,.04),(11500,.09),(12000,.09),
-          (12500,.11),(13000,.16),(14000,.20),(15000,.15),(16000,.13)]
-assert abs(sum(prob for _,prob in DEMAND)-1) < 1e-9
-P, SALVAGE, Q, BASE_Q, BASE_W = 125., 20., 15000, 13000, 80.
+# v3: Workbook-derived case. Baseline salvage is an external sale, NOT a supplier payment.
+DEMAND = [(12000,.071),(13000,.071),(14000,.143),(15000,.143),
+          (16000,.214),(17000,.070),(18000,.143),(19000,.145)]
+assert abs(sum(prob for _, prob in DEMAND)-1) < 1e-9
+P, SALVAGE, Q, BASE_Q, BASE_W = 95., 42., 15000, 13000, 55.
+FIXED_SUPPLIER_COST = 100000.
 MAX_PROMPTS = 10
-MIN_W, MAX_W, MIN_B, MAX_B = 40., 120., 0., 100.
-TOL = .51  # Dollar tolerance for student Excel rounding
+MIN_W, MAX_W, MIN_B, MAX_B = 35., 90., 0., 75.
+TOL = .51
 
 st.markdown('''<style>
 .block-container{max-width:1460px;padding-top:1.25rem;padding-bottom:3rem}
@@ -37,7 +38,7 @@ def setting(key, default=None):
 
 SECRET = str(setting("scenario_secret", ""))
 OPENAI_KEY = str(setting("OPENAI_API_KEY", ""))
-OPENAI_MODEL = str(setting("openai_model", "gpt-4.1-mini"))
+OPENAI_MODEL = str(setting("openai_model", "gpt-6-luna"))
 
 
 def unsold(q):
@@ -59,19 +60,19 @@ BASE_LOW = downside(BASE_W,0,BASE_Q,baseline=True)
 def private_cost(name):
     # Demo mode is blocked below; never use an unkeyed public hash for graded scenarios.
     digest=hmac.new(SECRET.encode(),name.strip().casefold().encode(),hashlib.sha256).digest()
-    return 46 + (int.from_bytes(digest[:4],"big")%801)/100
+    return 35 + (int.from_bytes(digest[:4],"big")%1101)/100
 
 
 def supplier_profit(w,b,c):
-    return (w-c)*Q-b*unsold(Q)-100000
+    return (w-c)*Q-b*unsold(Q)-FIXED_SUPPLIER_COST
 
 
 def supplier_baseline(c):
-    return (BASE_W-c)*BASE_Q-100000
+    return (BASE_W-c)*BASE_Q-FIXED_SUPPLIER_COST
 
 
 def supplier_decision(w,b,c):
-    return "accept" if supplier_profit(w,b,c)>=supplier_baseline(c)-1e-8 else "reject"
+    return "accept" if (supplier_profit(w,b,c)>supplier_baseline(c)+.01 and buyer_profit(w,b)>BASE_PROFIT+.01) else "reject"
 
 
 def supplier_reply(decision):
@@ -84,15 +85,16 @@ def supplier_reply(decision):
     try:
         from openai import OpenAI
         client=OpenAI(api_key=OPENAI_KEY,timeout=12.0,max_retries=0)
-        result=client.chat.completions.create(
-            model=OPENAI_MODEL,temperature=0.2,max_tokens=90,
-            messages=[{"role":"system","content":(
+        result=client.responses.create(
+            model=OPENAI_MODEL,max_output_tokens=110,
+            instructions=(
                 "You are a professional supplier in a classroom buy-back negotiation. "
-                "Write one concise sentence. Do not disclose costs, profits, reservation conditions, thresholds, numbers, "
-                "or make counteroffers or hints. Never change the authoritative decision supplied. "
-                "Never claim an agreement unless decision is accept.")},
-                {"role":"user","content":f"Authoritative decision: {decision}. Respond accordingly."}])
-        text=(result.choices[0].message.content or "").strip()
+                "Write one concise sentence. Do not disclose costs, profits, reservation conditions, thresholds, "
+                "or numbers, and do not make counteroffers or directional hints. "
+                "The Python decision is authoritative; do not contradict it. "
+                "Only say you accept if the decision is accept."),
+            input=f"Authoritative supplier decision: {decision}. Respond accordingly.")
+        text=(result.output_text or "").strip()
         if not text or re.search(r"\d|\$|cost|profit|threshold|margin|reservation",text,re.I): return fallback
         if decision=="accept" and not re.search(r"accept|agree",text,re.I): return fallback
         if decision=="reject" and not re.search(r"cannot|unable|reject|not accept|decline",text,re.I): return fallback
@@ -111,7 +113,7 @@ def initialize(name):
     st.session_state.bb_cost=private_cost(name)
     st.session_state.bb_baseline_verified=False
     st.session_state.bb_messages=[{"role":"assistant","content":
-        "Welcome. The order quantity is fixed at 15,000 units. I will review proposals containing a wholesale price and a buy-back price."}]
+        "Welcome. The order quantity is fixed at 15,000 units. I will consider wholesale and buy-back offers. Both firms must improve on their existing arrangement."}]
     st.session_state.bb_log=[]
     st.session_state.bb_accepted=[]
     st.session_state.bb_last=(BASE_W,0.)
@@ -150,7 +152,7 @@ def export_payload():
         "started_utc":st.session_state.bb_started,"finished_utc":st.session_state.bb_finished,
         "baseline_expected_profit_entered":st.session_state.bb_baseline_entry,
         "baseline_expected_profit_verified":True,"baseline_order_quantity":BASE_Q,
-        "baseline_wholesale_price":BASE_W,"baseline_salvage":SALVAGE,
+        "baseline_wholesale_price":BASE_W,"baseline_salvage":SALVAGE,"salvage_is_external":True,
         "prompts_used":len(st.session_state.bb_log),
         "rejections":sum(e["decision"]=="reject" for e in st.session_state.bb_log),
         "outcome":"agreement" if f else "no_agreement",
@@ -159,7 +161,10 @@ def export_payload():
         "gain_over_baseline":round(f["buyer_profit"]-BASE_PROFIT,2) if f else 0,
         "lowest_demand_profit":round(downside(f["wholesale_price"],f["buyback_price"]),2) if f else None,
         "baseline_expected_profit":round(BASE_PROFIT,2),"baseline_low_demand_profit":round(BASE_LOW,2),
-        "negotiation_log":st.session_state.bb_log}
+        "negotiation_log":st.session_state.bb_log,
+        "buyer_improved":bool(f and f["buyer_profit"]>BASE_PROFIT),
+        "supplier_improved_verified_privately":bool(f),
+        "financial_method":"Baseline external salvage; contract unsold units returned at buyback price."}
 
 
 def pdf_report(payload,code):
@@ -224,6 +229,7 @@ with st.sidebar:
     st.metric("Baseline wholesale price",f"${BASE_W:.0f}")
     st.metric("Baseline order quantity",f"{BASE_Q:,}")
     st.metric("Negotiated order quantity",f"{Q:,}")
+    st.caption("Baseline salvage comes from an external market; it is not paid by the supplier.")
     st.write("**Demand scenarios**")
     st.dataframe(pd.DataFrame(DEMAND,columns=["Demand","Probability"]).style.format({"Demand":"{:,.0f}","Probability":"{:.0%}"}),hide_index=True,use_container_width=True)
     if st.button("Restart lab"):
@@ -232,8 +238,9 @@ with st.sidebar:
 if not st.session_state.bb_baseline_verified:
     st.subheader("Stage 1 · Establish the no-contract baseline")
     st.write("In Excel, calculate expected buyer profit for the baseline order of 13,000 units at "
-             "wholesale price $80, with a $20 salvage value for each unsold unit. "
-             "Use the demand probabilities in the sidebar. The app will verify your calculation without revealing the answer.")
+             "wholesale price $55, with a $42 EXTERNAL salvage value for each unsold unit. "
+             "The supplier does not pay this baseline salvage value. Use the demand probabilities in the sidebar. "
+             "The app will verify your calculation without revealing the answer.")
     value=st.number_input("Expected baseline buyer profit ($)",value=None,step=100.,format="%.2f")
     if st.button("Verify baseline and enter negotiation",type="primary",disabled=value is None):
         if abs(value-BASE_PROFIT)<=TOL:
@@ -269,6 +276,8 @@ with left:
                 st.error("Enter your Excel-calculated expected buyer profit before submitting.")
             elif abs(float(student_profit)-buyer_profit(w,b))>TOL:
                 st.error("Your expected buyer profit does not match these contract terms. Check your Excel calculations and resubmit. This did not use a negotiation prompt.")
+            elif buyer_profit(w,b)<=BASE_PROFIT+.01:
+                st.error("This offer does not improve your buyer profit over the no-contract baseline. Revise your terms before contacting the supplier. No prompt used.")
             else:
                 decision=supplier_decision(w,b,st.session_state.bb_cost)
                 st.session_state.bb_last=(w,b)
@@ -282,7 +291,7 @@ with left:
                 st.rerun()
     if st.session_state.bb_finished is None:
         if st.session_state.bb_accepted:
-            st.info("An offer has been accepted. You can finalize the best accepted contract or continue negotiating.")
+            st.info("An offer has been accepted and both parties benefit. You can finalize the best accepted contract or continue negotiating.")
             if st.button("Lock in best accepted contract",type="primary"):
                 finalize();st.rerun()
         else:
@@ -303,7 +312,7 @@ with right:
                 "Supplier response":e["decision"].title()})
         st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
     else: st.caption("Verified offers and supplier responses will appear here.")
-    st.caption("Supplier cost, profit, and acceptance threshold remain confidential.")
+    st.caption("Supplier cost, profit, and acceptance threshold remain confidential. A successful contract must benefit both firms.")
 
 if st.session_state.bb_finished is not None:
     st.divider()
