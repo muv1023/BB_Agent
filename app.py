@@ -17,11 +17,15 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 st.set_page_config(page_title="Buy-Back Contract | BAN 517", page_icon="🤝", layout="wide")
 
+# v3.4: deterministic individualized demand, baseline wholesale and private supplier cost.
+# v3.3: MV's Widget Company supplier identity and signature block.
 # v3: Workbook-derived case. Baseline salvage is an external sale, NOT a supplier payment.
-DEMAND = [(12000,.071),(13000,.071),(14000,.143),(15000,.143),
-          (16000,.214),(17000,.070),(18000,.143),(19000,.145)]
-assert abs(sum(prob for _, prob in DEMAND)-1) < 1e-9
-P, SALVAGE, Q, BASE_Q, BASE_W = 95., 42., 15000, 13000, 55.
+BASE_DEMAND = [(12000,.071),(13000,.071),(14000,.143),(15000,.143),
+               (16000,.214),(17000,.070),(18000,.143),(19000,.145)]
+assert abs(sum(prob for _, prob in BASE_DEMAND)-1) < 1e-9
+P, SALVAGE, Q, BASE_Q = 95., 42., 15000, 13000
+# Case parameters are initialized only after a student enters their name.
+# No student-specific financial values are stored in module-level globals.
 FIXED_SUPPLIER_COST = 100000.
 MAX_PROMPTS = 10
 MIN_W, MAX_W, MIN_B, MAX_B = 35., 90., 0., 75.
@@ -50,38 +54,79 @@ OPENAI_MODEL = str(setting("openai_model", "gpt-6-luna"))
 MASCOT = Path(__file__).parent / "assets" / "sammy_seahawk_ai.png"
 
 
-def unsold(q):
-    return sum(prob * max(q-demand, 0) for demand, prob in DEMAND)
+def student_scenario(name):
+    """Reproducible student case, derived from a private keyed hash.
+
+    A modest demand tilt, baseline wholesale variation and confidential supplier
+    cost variation reduce copyability. The baseline and offer profit formulas use
+    the exact same case throughout a session.
+    """
+    key = name.strip().casefold().encode("utf-8")
+    digest = hmac.new(SECRET.encode("utf-8"), key, hashlib.sha256).digest()
+    tilt = (int.from_bytes(digest[:4], "big") / (2**32 - 1) * 2 - 1) * .075
+    # Tilt the demand distribution slightly toward higher/lower demand.
+    weights = [(d, pr * (1 + tilt * (d - 15500) / 3500)) for d, pr in BASE_DEMAND]
+    total = sum(pr for _, pr in weights)
+    distribution = [(d, pr / total) for d, pr in weights]
+    baseline_w = 53 + int.from_bytes(digest[4:8], "big") % 5  # $53-$57
+    supplier_cost = 35 + (int.from_bytes(digest[8:12], "big") % 801) / 100  # $35-$43
+    case = {"demand": distribution, "baseline_w": float(baseline_w), "cost": supplier_cost}
+    assert abs(sum(prob for _, prob in distribution)-1) < 1e-9
+    # Verify that enough total supply-chain improvement is available.
+    gain = chain_surplus(case)
+    if gain < 20000:
+        raise ValueError("Supplier scenario has insufficient joint surplus")
+    return case
 
 
-def buyer_profit(w, b, q=Q, baseline=False):
+def current_case():
+    return st.session_state.bb_case
+
+
+def unsold(q, case=None):
+    case = case if case is not None else current_case()
+    return sum(prob * max(q-demand, 0) for demand, prob in case["demand"])
+
+
+def buyer_profit(w, b, q=Q, baseline=False, case=None):
+    case = case if case is not None else current_case()
     return sum(prob * (P*min(demand,q) - w*q + (SALVAGE if baseline else b)*max(q-demand,0))
-               for demand,prob in DEMAND)
+               for demand,prob in case["demand"])
 
 
-def downside(w,b,q=Q,baseline=False):
-    return P*min(DEMAND[0][0],q)-w*q+(SALVAGE if baseline else b)*max(q-DEMAND[0][0],0)
-
-BASE_PROFIT = buyer_profit(BASE_W,0,BASE_Q,baseline=True)
-BASE_LOW = downside(BASE_W,0,BASE_Q,baseline=True)
-
-
-def private_cost(name):
-    # Demo mode is blocked below; never use an unkeyed public hash for graded scenarios.
-    digest=hmac.new(SECRET.encode(),name.strip().casefold().encode(),hashlib.sha256).digest()
-    return 35 + (int.from_bytes(digest[:4],"big")%1101)/100
+def downside(w,b,q=Q,baseline=False,case=None):
+    case = case if case is not None else current_case()
+    d=min(d for d,_ in case["demand"])
+    return P*min(d,q)-w*q+(SALVAGE if baseline else b)*max(q-d,0)
 
 
-def supplier_profit(w,b,c):
-    return (w-c)*Q-b*unsold(Q)-FIXED_SUPPLIER_COST
+def baseline_buyer(case=None):
+    case = case if case is not None else current_case()
+    return buyer_profit(case["baseline_w"],0,BASE_Q,baseline=True,case=case)
 
 
-def supplier_baseline(c):
-    return (BASE_W-c)*BASE_Q-FIXED_SUPPLIER_COST
+def supplier_profit(w,b,case=None):
+    case = case if case is not None else current_case()
+    return (w-case["cost"])*Q-b*unsold(Q,case)-FIXED_SUPPLIER_COST
 
 
-def supplier_decision(w,b,c):
-    return "accept" if (supplier_profit(w,b,c)>supplier_baseline(c)+.01 and buyer_profit(w,b)>BASE_PROFIT+.01) else "reject"
+def supplier_baseline(case=None):
+    case = case if case is not None else current_case()
+    return (case["baseline_w"]-case["cost"])*BASE_Q-FIXED_SUPPLIER_COST
+
+
+def chain_surplus(case):
+    # Wholesale and buy-back transfers cancel between buyer and supplier.
+    # Baseline salvage is external revenue and appears only for the buyer.
+    baseline = buyer_profit(case["baseline_w"],0,BASE_Q,baseline=True,case=case) + supplier_baseline(case)
+    contract = buyer_profit(case["baseline_w"],0,Q,case=case) + supplier_profit(case["baseline_w"],0,case=case)
+    return contract-baseline
+
+
+def supplier_decision(w,b,case=None):
+    case = case if case is not None else current_case()
+    return "accept" if (supplier_profit(w,b,case)>supplier_baseline(case)+.01 and
+                        buyer_profit(w,b,case=case)>baseline_buyer(case)+.01) else "reject"
 
 
 def question_intent(message):
@@ -139,7 +184,7 @@ def supplier_reply(decision, message="", offer=None, history=None, best=None):
         result = client.responses.create(
             model=OPENAI_MODEL, max_output_tokens=350,
             instructions=(
-                "You are a professional, courteous, engaged supplier representative in a university "
+                "You are MV's Widget, a professional, courteous, engaged supplier representative of MV Widget Company in a university "
                 "buy-back contract negotiation. Speak naturally in 2-4 concise sentences, with continuity "
                 "from the recent conversation. Acknowledge the student's actual question or proposal. "
                 "The supplied Python decision is FINAL and BINDING. For 'accept', clearly confirm acceptance; "
@@ -181,13 +226,13 @@ def reset():
 
 def initialize(name):
     st.session_state.bb_name=name.strip()
-    st.session_state.bb_cost=private_cost(name)
+    st.session_state.bb_case=student_scenario(name)
     st.session_state.bb_baseline_verified=False
     st.session_state.bb_messages=[{"role":"assistant","content":
         "Welcome. The order quantity is fixed at 15,000 units. I will consider wholesale and buy-back offers. Both firms must improve on their existing arrangement."}]
     st.session_state.bb_log=[]
     st.session_state.bb_accepted=[]
-    st.session_state.bb_last=(BASE_W,0.)
+    st.session_state.bb_last=(st.session_state.bb_case["baseline_w"],0.)
     st.session_state.bb_finished=None
     st.session_state.bb_final=None
     st.session_state.bb_buyer_signed_name=None
@@ -233,23 +278,28 @@ def export_payload():
         "started_utc":st.session_state.bb_started,"finished_utc":st.session_state.bb_finished,
         "baseline_expected_profit_entered":st.session_state.bb_baseline_entry,
         "baseline_expected_profit_verified":True,"baseline_order_quantity":BASE_Q,
-        "baseline_wholesale_price":BASE_W,"baseline_salvage":SALVAGE,"salvage_is_external":True,
+        "baseline_wholesale_price":current_case()["baseline_w"],
+        "demand_distribution":[{"demand":d,"probability":round(pr,10)} for d,pr in current_case()["demand"]],"baseline_salvage":SALVAGE,"salvage_is_external":True,
         "prompts_used":len(st.session_state.bb_log),
         "rejections":sum(e["decision"]=="reject" for e in st.session_state.bb_log),
         "outcome":"agreement" if f else "no_agreement",
         "final_contract":({"wholesale_price":f["wholesale_price"],"buyback_price":f["buyback_price"],"order_quantity":Q} if f else None),
         "buyer_expected_profit":round(f["buyer_profit"],2) if f else None,
-        "gain_over_baseline":round(f["buyer_profit"]-BASE_PROFIT,2) if f else 0,
+        "gain_over_baseline":round(f["buyer_profit"]-baseline_buyer(),2) if f else 0,
         "lowest_demand_profit":round(downside(f["wholesale_price"],f["buyback_price"]),2) if f else None,
-        "baseline_expected_profit":round(BASE_PROFIT,2),"baseline_low_demand_profit":round(BASE_LOW,2),
+        "baseline_expected_profit":round(baseline_buyer(),2),"baseline_low_demand_profit":round(downside(current_case()["baseline_w"],0,BASE_Q,baseline=True),2),
         "negotiation_log":st.session_state.bb_log,
-        "buyer_improved":bool(f and f["buyer_profit"]>BASE_PROFIT),
+        "buyer_improved":bool(f and f["buyer_profit"]>baseline_buyer()),
         "supplier_improved_verified_privately":bool(f),
         "financial_method":"Baseline external salvage; contract unsold units returned at buyback price.",
         "buyer_signature":{"typed_name":st.session_state.bb_buyer_signed_name,
                            "signed_utc":st.session_state.bb_buyer_signed_utc,
                            "method":"typed electronic acknowledgment"} if st.session_state.bb_buyer_signed_utc else None,
-        "supplier_signature":{"signed_by":"Supplier Negotiation Agent (automated)",
+        "supplier_signature":{"signed_by":"Manoj Nair",
+                              "title":"Director of Purchasing Analytics",
+                              "company":"MV Widget Company",
+                              "location":"Wilmington, NC",
+                              "signature_type":"automated simulation attestation",
                               "signed_utc":st.session_state.bb_supplier_signed_utc,
                               "method":"system-generated confirmation of Python-accepted contract"} if st.session_state.bb_supplier_signed_utc else None,
         "contract_status":"executed" if (f and st.session_state.bb_buyer_signed_utc and st.session_state.bb_supplier_signed_utc) else ("pending_buyer_signature" if f else "no_agreement") }
@@ -269,7 +319,7 @@ def pdf_report(payload, code):
     f=payload["final_contract"]
     if f:
         story.append(Paragraph("1. Parties and contract terms",styles["Heading2"]))
-        story.append(Paragraph("Buyer: "+escape(payload["student_name"])+"<br/>Supplier: Supplier Negotiation Agent (automated classroom simulation)",styles["BBClause"]))
+        story.append(Paragraph("Buyer: "+escape(payload["student_name"])+"<br/>Supplier: MV's Widget | MV Widget Company, Wilmington, NC (automated classroom simulation)",styles["BBClause"]))
         terms=[("Order quantity",f'{f["order_quantity"]:,} units'),
                ("Wholesale price per unit",f'${f["wholesale_price"]:,.2f}'),
                ("Buy-back price per returned unit",f'${f["buyback_price"]:,.2f}')]
@@ -286,8 +336,9 @@ def pdf_report(payload, code):
         supplier=payload["supplier_signature"] or {}
         signatures=[
           [Paragraph("<b>BUYER - ELECTRONIC ACKNOWLEDGMENT</b>",styles["Normal"]),Paragraph("<b>SUPPLIER - AUTOMATED ATTESTATION</b>",styles["Normal"])],
-          [Paragraph(escape(buyer.get("typed_name") or "Unsigned"),styles["Heading2"]),Paragraph("Supplier Negotiation Agent",styles["Heading2"])],
-          [Paragraph("Signed (UTC): "+escape(str(buyer.get("signed_utc") or "-")),styles["BBFine"]),Paragraph("Confirmed (UTC): "+escape(str(supplier.get("signed_utc") or "-")),styles["BBFine"])]
+          [Paragraph(escape(buyer.get("typed_name") or "Unsigned"),styles["Heading2"]),Paragraph("Manoj Nair",styles["Heading2"])],
+          [Paragraph("Buyer",styles["BBFine"]),Paragraph("Director of Purchasing Analytics<br/>MV Widget Company<br/>Wilmington, NC",styles["BBFine"])],
+          [Paragraph("Signed (UTC): "+escape(str(buyer.get("signed_utc") or "-")),styles["BBFine"]),Paragraph("Confirmed by simulation (UTC): "+escape(str(supplier.get("signed_utc") or "-")),styles["BBFine"])]
         ]
         t=Table(signatures,colWidths=[255,255]);t.setStyle(TableStyle([("BOX",(0,0),(-1,-1),.5,colors.HexColor("#ccd8df")),("INNERGRID",(0,0),(-1,-1),.3,colors.HexColor("#ccd8df")),("PADDING",(0,0),(-1,-1),10)]))
         story.extend([t,Spacer(1,15),Paragraph("Verification reference: "+escape(code),styles["BBFine"])])
@@ -301,7 +352,7 @@ def pdf_report(payload, code):
         block=[Paragraph(f'<b>Prompt {e["prompt"]}:</b> '+escape(e["message"]),styles["BodyText"])]
         if e["wholesale_price"] is not None:
             block.append(Paragraph(f'Wholesale ${e["wholesale_price"]:.2f} | Buy-back ${e["buyback_price"]:.2f} | Buyer calculated profit ${e["buyer_expected_profit_entered"]:,.2f}',styles["Normal"]))
-        block.extend([Paragraph("Supplier: "+escape(e["response"]),styles["Normal"]),Spacer(1,9)])
+        block.extend([Paragraph("MV's Widget: "+escape(e["response"]),styles["Normal"]),Spacer(1,9)])
         story.append(KeepTogether(block))
     story.extend([Spacer(1,12),Paragraph("BAN 517 | Dr. Manoj Vanajakumari",styles["BBFine"])])
     doc.build(story)
@@ -316,7 +367,7 @@ if not SECRET:
 
 if "bb_name" not in st.session_state:
     st.subheader("Begin the final negotiation")
-    st.write("You are the buyer. The supplier will negotiate the wholesale and buy-back prices. "
+    st.write("You are the buyer. MV's Widget will negotiate the wholesale and buy-back prices. "
              "You will calculate expected profits in Excel and enter them before making offers.")
     name=st.text_input("Student full name",placeholder="First and last name")
     if st.button("Continue to baseline analysis",type="primary",disabled=not name.strip()):
@@ -329,24 +380,24 @@ with st.sidebar:
     st.write(f"**Student:** {st.session_state.bb_name}")
     st.metric("Selling price",f"${P:.0f}")
     st.metric("Salvage value (baseline)",f"${SALVAGE:.0f}")
-    st.metric("Baseline wholesale price",f"${BASE_W:.0f}")
+    st.metric("Baseline wholesale price",f"${current_case()['baseline_w']:.0f}")
     st.metric("Baseline order quantity",f"{BASE_Q:,}")
     st.metric("Negotiated order quantity",f"{Q:,}")
     st.caption("Baseline salvage comes from an external market; it is not paid by the supplier.")
     st.write("**Demand scenarios**")
-    st.dataframe(pd.DataFrame(DEMAND,columns=["Demand","Probability"]).style.format({"Demand":"{:,.0f}","Probability":"{:.0%}"}),hide_index=True,use_container_width=True)
+    st.dataframe(pd.DataFrame(current_case()["demand"],columns=["Demand","Probability"]).style.format({"Demand":"{:,.0f}","Probability":"{:.0%}"}),hide_index=True,use_container_width=True)
     if st.button("Restart lab"):
         reset();st.rerun()
 
 if not st.session_state.bb_baseline_verified:
     st.subheader("Stage 1 · Establish the no-contract baseline")
     st.write("In Excel, calculate expected buyer profit for the baseline order of 13,000 units at "
-             "wholesale price $55, with a $42 EXTERNAL salvage value for each unsold unit. "
+             f"wholesale price ${current_case()['baseline_w']:.0f}, with a $42 EXTERNAL salvage value for each unsold unit. "
              "The supplier does not pay this baseline salvage value. Use the demand probabilities in the sidebar. "
              "The app will verify your calculation without revealing the answer.")
     value=st.number_input("Expected baseline buyer profit ($)",value=None,step=100.,format="%.2f")
     if st.button("Verify baseline and enter negotiation",type="primary",disabled=value is None):
-        if abs(value-BASE_PROFIT)<=TOL:
+        if abs(value-baseline_buyer())<=TOL:
             st.session_state.bb_baseline_entry=float(value)
             st.session_state.bb_baseline_verified=True
             st.rerun()
@@ -360,7 +411,7 @@ st.progress(count/MAX_PROMPTS,text=(f"Prompt {count+1} of {MAX_PROMPTS}" if coun
 
 left,right=st.columns([1.65,1],gap="large")
 with left:
-    st.markdown("#### Supplier conversation")
+    st.markdown("#### MV's Widget · Supplier conversation")
     for message in st.session_state.bb_messages:
         avatar = str(MASCOT) if message["role"] == "assistant" and MASCOT.exists() else None
         with st.chat_message(message["role"], avatar=avatar):
@@ -381,10 +432,10 @@ with left:
                 st.error("Enter your Excel-calculated expected buyer profit before submitting.")
             elif abs(float(student_profit)-buyer_profit(w,b))>TOL:
                 st.error("Your expected buyer profit does not match these contract terms. Check your Excel calculations and resubmit. This did not use a negotiation prompt.")
-            elif buyer_profit(w,b)<=BASE_PROFIT+.01:
+            elif buyer_profit(w,b)<=baseline_buyer()+.01:
                 st.error("This offer does not improve your buyer profit over the no-contract baseline. Revise your terms before contacting the supplier. No prompt used.")
             else:
-                decision=supplier_decision(w,b,st.session_state.bb_cost)
+                decision=supplier_decision(w,b)
                 st.session_state.bb_last=(w,b)
                 message=note.strip() or f"I offer wholesale ${w:.2f} and buy-back ${b:.2f}."
                 record_prompt(message,decision,(w,b),float(student_profit))
@@ -420,7 +471,7 @@ with right:
                 "Supplier response":e["decision"].title()})
         st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
     else: st.caption("Verified offers and supplier responses will appear here.")
-    st.caption("Supplier cost, profit, and acceptance threshold remain confidential. A successful contract must benefit both firms.")
+    st.caption("MV's Widget keeps supplier cost, profit, and acceptance threshold confidential. A successful contract must benefit both firms.")
     if bool(setting("instructor_diagnostics", False)):
         with st.expander("Instructor diagnostics · API response source"):
             st.write("Response source:", st.session_state.get("bb_api_source", "not_called"))
@@ -439,7 +490,7 @@ if st.session_state.bb_finished is not None:
         c.metric("Order quantity",f'{Q:,}')
         a,b,c=st.columns(3)
         a.metric("Buyer expected profit",f'${f["buyer_profit"]:,.2f}')
-        b.metric("Gain over baseline",f'${f["buyer_profit"]-BASE_PROFIT:,.2f}')
+        b.metric("Gain over baseline",f'${f["buyer_profit"]-baseline_buyer():,.2f}')
         c.metric("Profit at lowest demand",f'${downside(f["wholesale_price"],f["buyback_price"]):,.2f}')
     else:
         st.warning("No agreement reached. The baseline is a comparison, not an accepted contract.")
