@@ -491,12 +491,29 @@ with right:
         st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
     else: st.caption("Verified offers and supplier responses will appear here.")
     st.caption("MV's Widget keeps supplier cost, profit, and acceptance threshold confidential. A successful contract must benefit both firms.")
-    if bool(setting("instructor_diagnostics", False)):
-        with st.expander("Instructor diagnostics · API response source"):
-            st.write("Response source:", st.session_state.get("bb_api_source", "not_called"))
-            if st.session_state.get("bb_api_last_error"):
-                st.code(st.session_state.bb_api_last_error)
-            st.caption("Enable only during private testing. Do not enable for students.")
+    # Instructor-only financial diagnostics. Never expose private scenario values
+    # without an independently configured instructor password.
+    instructor_password = str(setting("instructor_password", ""))
+    if instructor_password:
+        with st.expander("Instructor diagnostics (restricted)", expanded=False):
+            entered_password = st.text_input("Instructor password", type="password", key="bb_instructor_password")
+            if entered_password and hmac.compare_digest(entered_password, instructor_password):
+                case = current_case()
+                supplier_base = supplier_baseline(case)
+                st.write("**Private scenario check — do not share with students**")
+                st.metric("Supplier unit cost", f'${case["cost"]:.2f}')
+                st.metric("Supplier baseline expected profit", f'${supplier_base:,.2f}')
+                st.metric("Expected unsold units at 15,000", f'{unsold(Q,case):,.2f}')
+                test_w = st.number_input("Test wholesale price ($)", min_value=MIN_W, max_value=MAX_W, value=float(case["baseline_w"]), step=1.0, key="bb_diag_w")
+                test_b = st.number_input("Test buy-back price ($)", min_value=MIN_B, max_value=MAX_B, value=42.0, step=1.0, key="bb_diag_b")
+                st.write("Supplier expected profit:", f'${supplier_profit(test_w,test_b,case=case):,.2f}')
+                st.write("Buyer expected profit:", f'${buyer_profit(test_w,test_b,case=case):,.2f}')
+                st.write("Decision:", supplier_decision(test_w,test_b))
+                st.write("Response source:", st.session_state.get("bb_api_source", "not_called"))
+                if st.session_state.get("bb_api_last_error"):
+                    st.code(st.session_state.bb_api_last_error)
+            else:
+                st.caption("Instructor authentication required. Financial values remain private.")
 
 if st.session_state.bb_finished is not None:
     st.divider()
