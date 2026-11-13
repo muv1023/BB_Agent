@@ -17,6 +17,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, Tabl
 
 st.set_page_config(page_title="Buy-Back Contract | BAN 517", page_icon="🤝", layout="wide")
 
+# v3.5: use exact integer-percent scenario probabilities for display and all calculations.
 # v3.4: deterministic individualized demand, baseline wholesale and private supplier cost.
 # v3.3: MV's Widget Company supplier identity and signature block.
 # v3: Workbook-derived case. Baseline salvage is an external sale, NOT a supplier payment.
@@ -67,7 +68,16 @@ def student_scenario(name):
     # Tilt the demand distribution slightly toward higher/lower demand.
     weights = [(d, pr * (1 + tilt * (d - 15500) / 3500)) for d, pr in BASE_DEMAND]
     total = sum(pr for _, pr in weights)
-    distribution = [(d, pr / total) for d, pr in weights]
+    # Allocate exactly 100 whole percentage points using largest remainders.
+    # Displayed percentages are the precise probabilities used in all calculations.
+    scaled = [100 * pr / total for _, pr in weights]
+    whole = [int(x) for x in scaled]
+    remaining = 100 - sum(whole)
+    ranked = sorted(range(len(whole)), key=lambda i: (-(scaled[i] - whole[i]), i))
+    for i in ranked[:remaining]:
+        whole[i] += 1
+    distribution = [(d, pct / 100) for (d, _), pct in zip(weights, whole)]
+    assert sum(whole) == 100
     baseline_w = 53 + int.from_bytes(digest[4:8], "big") % 5  # $53-$57
     supplier_cost = 35 + (int.from_bytes(digest[8:12], "big") % 801) / 100  # $35-$43
     case = {"demand": distribution, "baseline_w": float(baseline_w), "cost": supplier_cost}
@@ -386,6 +396,7 @@ with st.sidebar:
     st.caption("Baseline salvage comes from an external market; it is not paid by the supplier.")
     st.write("**Demand scenarios**")
     st.dataframe(pd.DataFrame(current_case()["demand"],columns=["Demand","Probability"]).style.format({"Demand":"{:,.0f}","Probability":"{:.0%}"}),hide_index=True,use_container_width=True)
+    st.caption("Probabilities are exact whole percentages and total 100%. Use these values in Excel.")
     if st.button("Restart lab"):
         reset();st.rerun()
 
