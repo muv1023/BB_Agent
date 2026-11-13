@@ -13,7 +13,7 @@ import streamlit as st
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether, PageBreak
 
 st.set_page_config(page_title="Buy-Back Contract | BAN 517", page_icon="🤝", layout="wide")
 
@@ -190,6 +190,9 @@ def initialize(name):
     st.session_state.bb_last=(BASE_W,0.)
     st.session_state.bb_finished=None
     st.session_state.bb_final=None
+    st.session_state.bb_buyer_signed_name=None
+    st.session_state.bb_buyer_signed_utc=None
+    st.session_state.bb_supplier_signed_utc=None
     st.session_state.bb_started=datetime.now(timezone.utc).isoformat()
     st.session_state.bb_api_source="not_called"
     st.session_state.bb_api_last_error=""
@@ -242,43 +245,65 @@ def export_payload():
         "negotiation_log":st.session_state.bb_log,
         "buyer_improved":bool(f and f["buyer_profit"]>BASE_PROFIT),
         "supplier_improved_verified_privately":bool(f),
-        "financial_method":"Baseline external salvage; contract unsold units returned at buyback price."}
+        "financial_method":"Baseline external salvage; contract unsold units returned at buyback price.",
+        "buyer_signature":{"typed_name":st.session_state.bb_buyer_signed_name,
+                           "signed_utc":st.session_state.bb_buyer_signed_utc,
+                           "method":"typed electronic acknowledgment"} if st.session_state.bb_buyer_signed_utc else None,
+        "supplier_signature":{"signed_by":"Supplier Negotiation Agent (automated)",
+                              "signed_utc":st.session_state.bb_supplier_signed_utc,
+                              "method":"system-generated confirmation of Python-accepted contract"} if st.session_state.bb_supplier_signed_utc else None,
+        "contract_status":"executed" if (f and st.session_state.bb_buyer_signed_utc and st.session_state.bb_supplier_signed_utc) else ("pending_buyer_signature" if f else "no_agreement") }
 
 
-def pdf_report(payload,code):
+def pdf_report(payload, code):
+    """Formal executed contract first; detailed negotiation audit on following pages."""
     buffer=io.BytesIO()
-    doc=SimpleDocTemplate(buffer,pagesize=letter,leftMargin=46,rightMargin=46,topMargin=45,bottomMargin=45)
+    doc=SimpleDocTemplate(buffer,pagesize=letter,leftMargin=48,rightMargin=48,topMargin=48,bottomMargin=45)
     styles=getSampleStyleSheet()
-    styles.add(ParagraphStyle(name="BBTitle",parent=styles["Title"],fontSize=17,textColor=colors.HexColor("#003b5c")))
-    story=[Paragraph("Buy-Back Contract Negotiation",styles["BBTitle"]),
-           Paragraph("BAN 517 | Final Decision Lab",styles["Normal"]),Spacer(1,10)]
-    rows=[["Student",payload["student_name"]],["Outcome",payload["outcome"].replace("_"," ").title()],
-          ["Verified baseline expected profit",f'${payload["baseline_expected_profit"]:,.2f}'],
-          ["Prompts used",str(payload["prompts_used"])],["Rejections",str(payload["rejections"])],
-          ["Completed (UTC)",payload["finished_utc"]],["Verification",code]]
-    if payload["final_contract"]:
-        f=payload["final_contract"]
-        rows += [["Wholesale price",f'${f["wholesale_price"]:,.2f}'],
-                 ["Buy-back price",f'${f["buyback_price"]:,.2f}'],["Order quantity",f'{Q:,}'],
-                 ["Expected buyer profit",f'${payload["buyer_expected_profit"]:,.2f}'],
-                 ["Gain over baseline",f'${payload["gain_over_baseline"]:,.2f}'],
-                 ["Lowest-demand buyer profit",f'${payload["lowest_demand_profit"]:,.2f}']]
-    else: rows.append(["Final contract","No agreement reached; baseline is reference only."])
-    table=Table([[Paragraph(escape(str(a)),styles["Normal"]),Paragraph(escape(str(b)),styles["Normal"])] for a,b in rows],colWidths=[200,320])
-    table.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.4,colors.HexColor("#dce4ea")),
-        ("BACKGROUND",(0,0),(0,-1),colors.HexColor("#edf5f7")),("VALIGN",(0,0),(-1,-1),"TOP"),
-        ("PADDING",(0,0),(-1,-1),6)]))
-    story.append(table)
-    story.append(Spacer(1,12))
-    story.append(Paragraph("Negotiation record",styles["Heading2"]))
+    navy=colors.HexColor("#003b5c")
+    styles.add(ParagraphStyle(name="BBContractTitle",parent=styles["Title"],fontSize=18,leading=23,textColor=navy,spaceAfter=12))
+    styles.add(ParagraphStyle(name="BBClause",parent=styles["BodyText"],fontSize=9.5,leading=14,spaceAfter=9))
+    styles.add(ParagraphStyle(name="BBFine",parent=styles["Normal"],fontSize=8,leading=11,textColor=colors.HexColor("#526173")))
+    story=[Paragraph("BAN 517 | Buy-Back Supply Contract",styles["BBContractTitle"]),
+           Paragraph("Educational simulation - final negotiated agreement",styles["BBFine"]),Spacer(1,15)]
+    f=payload["final_contract"]
+    if f:
+        story.append(Paragraph("1. Parties and contract terms",styles["Heading2"]))
+        story.append(Paragraph("Buyer: "+escape(payload["student_name"])+"<br/>Supplier: Supplier Negotiation Agent (automated classroom simulation)",styles["BBClause"]))
+        terms=[("Order quantity",f'{f["order_quantity"]:,} units'),
+               ("Wholesale price per unit",f'${f["wholesale_price"]:,.2f}'),
+               ("Buy-back price per returned unit",f'${f["buyback_price"]:,.2f}')]
+        t=Table([[Paragraph(escape(k),styles["Normal"]),Paragraph(escape(v),styles["Normal"])] for k,v in terms],colWidths=[245,265])
+        t.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.45,colors.HexColor("#ccd8df")),("BACKGROUND",(0,0),(0,-1),colors.HexColor("#eaf4f5")),("PADDING",(0,0),(-1,-1),9)]))
+        story.extend([t,Spacer(1,12)])
+        story.append(Paragraph("2. Buy-back arrangement",styles["Heading2"]))
+        story.append(Paragraph("The buyer purchases the fixed quantity stated above at the agreed wholesale price. Unsold units are eligible for return to the supplier at the agreed buy-back price under the assumptions of this classroom simulation. Baseline external salvage revenue is not an additional payment under this buy-back arrangement.",styles["BBClause"]))
+        story.append(Paragraph("3. Financial summary",styles["Heading2"]))
+        story.append(Paragraph(f'Buyer expected profit: <b>${payload["buyer_expected_profit"]:,.2f}</b><br/>Buyer gain over no-contract baseline: <b>${payload["gain_over_baseline"]:,.2f}</b><br/>No-contract baseline buyer expected profit: ${payload["baseline_expected_profit"]:,.2f}',styles["BBClause"]))
+        story.append(Paragraph("4. Agreement and signatures",styles["Heading2"]))
+        story.append(Paragraph("The supplier accepted these terms through the deterministic financial decision engine. The buyer acknowledges this agreement by entering their name and confirming the terms. The supplier signature below is an automated system attestation, not a handwritten signature or an assertion that a human supplier signed.",styles["BBClause"]))
+        buyer=payload["buyer_signature"] or {}
+        supplier=payload["supplier_signature"] or {}
+        signatures=[
+          [Paragraph("<b>BUYER - ELECTRONIC ACKNOWLEDGMENT</b>",styles["Normal"]),Paragraph("<b>SUPPLIER - AUTOMATED ATTESTATION</b>",styles["Normal"])],
+          [Paragraph(escape(buyer.get("typed_name") or "Unsigned"),styles["Heading2"]),Paragraph("Supplier Negotiation Agent",styles["Heading2"])],
+          [Paragraph("Signed (UTC): "+escape(str(buyer.get("signed_utc") or "-")),styles["BBFine"]),Paragraph("Confirmed (UTC): "+escape(str(supplier.get("signed_utc") or "-")),styles["BBFine"])]
+        ]
+        t=Table(signatures,colWidths=[255,255]);t.setStyle(TableStyle([("BOX",(0,0),(-1,-1),.5,colors.HexColor("#ccd8df")),("INNERGRID",(0,0),(-1,-1),.3,colors.HexColor("#ccd8df")),("PADDING",(0,0),(-1,-1),10)]))
+        story.extend([t,Spacer(1,15),Paragraph("Verification reference: "+escape(code),styles["BBFine"])])
+    else:
+        story.append(Paragraph("No agreement reached. No contract was executed. The baseline remains the reference scenario.",styles["BBClause"]))
+        story.append(Paragraph("Verification reference: "+escape(code),styles["BBFine"]))
+    story.extend([PageBreak(),Paragraph("Negotiation record and calculations",styles["Heading1"]),
+                  Paragraph("Student: "+escape(payload["student_name"]),styles["Normal"]),
+                  Paragraph("Prompts used: "+str(payload["prompts_used"])+" | Rejections: "+str(payload["rejections"]),styles["Normal"]),Spacer(1,12)])
     for e in payload["negotiation_log"]:
-        story.append(Paragraph(f'<b>Prompt {e["prompt"]}:</b> '+escape(e["message"]),styles["BodyText"]))
+        block=[Paragraph(f'<b>Prompt {e["prompt"]}:</b> '+escape(e["message"]),styles["BodyText"])]
         if e["wholesale_price"] is not None:
-            story.append(Paragraph(f'Offer: w=${e["wholesale_price"]:.2f}, b=${e["buyback_price"]:.2f}; '
-                f'Buyer calculated profit=${e["buyer_expected_profit_entered"]:,.2f}',styles["Normal"]))
-        story.append(Paragraph("Supplier: "+escape(e["response"]),styles["Normal"]))
-        story.append(Spacer(1,6))
-    story.append(Paragraph("BAN 517 | Dr. Manoj Vanajakumari",styles["Normal"]))
+            block.append(Paragraph(f'Wholesale ${e["wholesale_price"]:.2f} | Buy-back ${e["buyback_price"]:.2f} | Buyer calculated profit ${e["buyer_expected_profit_entered"]:,.2f}',styles["Normal"]))
+        block.extend([Paragraph("Supplier: "+escape(e["response"]),styles["Normal"]),Spacer(1,9)])
+        story.append(KeepTogether(block))
+    story.extend([Spacer(1,12),Paragraph("BAN 517 | Dr. Manoj Vanajakumari",styles["BBFine"])])
     doc.build(story)
     return buffer.getvalue()
 
@@ -424,12 +449,34 @@ if st.session_state.bb_finished is not None:
     if offers:
         st.markdown("#### Expected buyer profit by offer")
         st.line_chart(pd.DataFrame(offers).set_index("Prompt"))
+    if f and not st.session_state.bb_buyer_signed_utc:
+        st.markdown("#### Execute the final agreement")
+        st.write("The best accepted contract is ready for your electronic acknowledgment. Review the wholesale price, buy-back price, and order quantity above before signing.")
+        with st.form("bb_signature_form"):
+            signed_name=st.text_input("Type your full name to sign",placeholder=st.session_state.bb_name)
+            consent=st.checkbox("I have reviewed the final contract terms and electronically agree to this simulated contract.")
+            sign=st.form_submit_button("Sign and execute contract",type="primary")
+        if sign:
+            if signed_name.strip().casefold()!=st.session_state.bb_name.strip().casefold():
+                st.error("The signature name must match the name entered at the beginning of the lab.")
+            elif not consent:
+                st.error("Confirm that you have reviewed and agree to the contract terms.")
+            else:
+                signed_at=datetime.now(timezone.utc).isoformat()
+                st.session_state.bb_buyer_signed_name=signed_name.strip()
+                st.session_state.bb_buyer_signed_utc=signed_at
+                st.session_state.bb_supplier_signed_utc=signed_at
+                st.rerun()
+        st.info("Sign the accepted agreement to enable the final PDF and JSON downloads.")
+    elif f:
+        st.success("Contract executed. Buyer acknowledgment and automated supplier attestation are included in the final PDF.")
     payload=export_payload()
     raw=json.dumps(payload,indent=2).encode()
     verification=hashlib.sha256(raw).hexdigest()[:16].upper()
     st.caption("Verification reference: "+verification)
     x,y=st.columns(2)
     safe_name=re.sub(r"[^A-Za-z0-9_-]+","_",st.session_state.bb_name).strip("_") or "student"
-    x.download_button("Download final PDF",pdf_report(payload,verification),file_name=f"BAN517_Buyback_{safe_name}.pdf",mime="application/pdf",use_container_width=True)
-    y.download_button("Download negotiation JSON",raw,file_name=f"BAN517_Buyback_{safe_name}.json",mime="application/json",use_container_width=True)
+    can_download=not f or bool(st.session_state.bb_buyer_signed_utc)
+    x.download_button("Download final PDF",pdf_report(payload,verification) if can_download else b"",file_name=f"BAN517_Buyback_{safe_name}.pdf",mime="application/pdf",use_container_width=True,disabled=not can_download)
+    y.download_button("Download negotiation JSON",raw if can_download else b"",file_name=f"BAN517_Buyback_{safe_name}.json",mime="application/json",use_container_width=True,disabled=not can_download)
     st.caption("Final course decision lab · Dr. Manoj Vanajakumari")
