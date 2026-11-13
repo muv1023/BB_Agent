@@ -31,6 +31,8 @@ FIXED_SUPPLIER_COST = 100000.
 MAX_PROMPTS = 10
 MIN_W, MAX_W, MIN_B, MAX_B = 35., 90., 0., 75.
 TOL = .51
+# Private supplier negotiation policy: retain half of the incremental chain surplus.
+SUPPLIER_SURPLUS_SHARE = 0.50
 
 st.markdown('''<style>
 .block-container{max-width:1460px;padding-top:1.25rem;padding-bottom:3rem}
@@ -82,10 +84,11 @@ def student_scenario(name):
     supplier_cost = 35 + (int.from_bytes(digest[8:12], "big") % 801) / 100  # $35-$43
     case = {"demand": distribution, "baseline_w": float(baseline_w), "cost": supplier_cost}
     assert abs(sum(prob for _, prob in distribution)-1) < 1e-9
-    # Verify that enough total supply-chain improvement is available.
+    # Equalize negotiation difficulty in relative terms for all individualized cases.
+    # Reject scenarios that lack enough surplus or a feasible pair of contract prices.
     gain = chain_surplus(case)
-    if gain < 20000:
-        raise ValueError("Supplier scenario has insufficient joint surplus")
+    if gain < 20000 or not calibrated_feasible(case):
+        raise ValueError("Supplier scenario has insufficient feasible negotiation surplus")
     return case
 
 
@@ -133,9 +136,38 @@ def chain_surplus(case):
     return contract-baseline
 
 
+def supplier_target(case=None):
+    """Private reservation profit: baseline plus a fixed fraction of new joint value.
+
+    This is a supplier negotiation policy, NOT a production cost. It applies
+    identically as a percentage to every student scenario.
+    """
+    case = case if case is not None else current_case()
+    return supplier_baseline(case) + SUPPLIER_SURPLUS_SHARE * chain_surplus(case)
+
+
+def calibrated_feasible(case):
+    """Check the permitted price space contains a mutually beneficial agreement.
+
+    With fixed Q, both profit functions are affine in w and b. We evaluate
+    a bounded set of candidate prices; exact analytic feasibility follows
+    from the positive joint surplus and permitted transfer range.
+    """
+    # At b=0, supplier profit rises and buyer profit falls linearly with w.
+    # Check whether the two bounds leave a nonempty feasible wholesale interval.
+    b = 0.
+    supplier_min_w = case["cost"] + (supplier_target(case) + FIXED_SUPPLIER_COST) / Q
+    sales_revenue = sum(pr * P * min(d, Q) for d,pr in case["demand"])
+    buyer_max_w = (sales_revenue - baseline_buyer(case)) / Q
+    low = max(MIN_W, supplier_min_w, b)
+    high = min(MAX_W, buyer_max_w)
+    return low + .001 < high
+
+
 def supplier_decision(w,b,case=None):
     case = case if case is not None else current_case()
-    return "accept" if (supplier_profit(w,b,case)>supplier_baseline(case)+.01 and
+    # Strict improvement for buyer; calibrated reservation for supplier.
+    return "accept" if (supplier_profit(w,b,case) >= supplier_target(case) - .01 and
                         buyer_profit(w,b,case=case)>baseline_buyer(case)+.01) else "reject"
 
 
@@ -506,9 +538,14 @@ with right:
                 st.metric("Expected unsold units at 15,000", f'{unsold(Q,case):,.2f}')
                 test_w = st.number_input("Test wholesale price ($)", min_value=MIN_W, max_value=MAX_W, value=float(case["baseline_w"]), step=1.0, key="bb_diag_w")
                 test_b = st.number_input("Test buy-back price ($)", min_value=MIN_B, max_value=MAX_B, value=42.0, step=1.0, key="bb_diag_b")
+                st.write("Supplier private reservation profit:", f'${supplier_target(case):,.2f}')
+                st.write("Incremental chain surplus:", f'${chain_surplus(case):,.2f}')
                 st.write("Supplier expected profit:", f'${supplier_profit(test_w,test_b,case=case):,.2f}')
                 st.write("Buyer expected profit:", f'${buyer_profit(test_w,test_b,case=case):,.2f}')
                 st.write("Decision:", supplier_decision(test_w,test_b))
+                expected_u = unsold(Q, case)
+                max_b = (test_w-case["cost"])*Q - FIXED_SUPPLIER_COST - supplier_target(case)
+                st.write("Maximum buy-back at tested wholesale (supplier constraint):", f'${max_b/expected_u:,.2f}' if expected_u else "N/A")
                 st.write("Response source:", st.session_state.get("bb_api_source", "not_called"))
                 if st.session_state.get("bb_api_last_error"):
                     st.code(st.session_state.bb_api_last_error)
